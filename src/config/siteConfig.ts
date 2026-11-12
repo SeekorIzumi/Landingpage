@@ -1,4 +1,4 @@
-export type CardIconType = 'music' | 'gift' | 'list-music' | 'book-open' | 'sparkles';
+export type CardIconType = 'music' | 'gift' | 'list-music' | 'book-open' | 'sparkles' | 'whatsapp';
 
 export interface CardSubLink {
   id: string;
@@ -94,13 +94,13 @@ export const siteConfig = {
       icon: 'book-open',
     },
     {
-      id: 'kiyora',
-      title: 'Kiyora',
-      description: 'Preset dan app premium di sini yaaa',
-      href: 'https://home.kiyora.web.id',
-      ariaLabel: 'Kiyora',
+      id: 'saluran-wa',
+      title: 'Saluran WA Izumi',
+      description: 'Info dan update terbaru di sini yaaa',
+      href: 'https://whatsapp.com/channel/0029VbDpHgSBVJlBQ5dPyP3Q',
+      ariaLabel: 'Saluran WA Izumi',
       newTab: true,
-      icon: 'sparkles',
+      icon: 'whatsapp',
     },
   ] as LinkCardItem[],
   flavor: {

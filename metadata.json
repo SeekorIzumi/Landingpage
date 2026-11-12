@@ -1,0 +1,6 @@
+{
+  "name": "Izumi - A Quiet Corner",
+  "description": "A quiet personal link hub made by Seekor Izumi — I'm building, keeping, refining, and making simple things.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
