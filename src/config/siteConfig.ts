@@ -80,7 +80,7 @@ export const siteConfig = {
           id: 'spotify',
           label: 'Spotify',
           emptyLabel: 'Segera hadir',
-          href: '',
+          href: 'https://open.spotify.com/playlist/5neD9kyHnA2eJnjgNrTlYp?si=OiH_5a9aTluBQGNlvb8heQ',
         },
       ],
     },

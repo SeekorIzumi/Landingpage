@@ -1499,3 +1499,128 @@ export function adjustRainScaleForFps(avgFrameDeltaMs: number, currentScale: num
   }
   return currentScale;
 }
+
+export interface HighlightSegment {
+  text: string;
+  highlight: boolean;
+}
+
+/**
+ * Pencocokan pencarian lagu di playlist:
+ * - Normalisasi judul, artis, dan kata kunci dengan normalizeForMatch
+ * - Jika input terdiri dari beberapa kata, semua kata harus cocok (urutan bebas) di judul atau artis
+ */
+export function matchesPlaylistTrackSearch(
+  title: string,
+  artist: string,
+  query: string
+): boolean {
+  const rawTrimmed = (query || '').trim();
+  if (!rawTrimmed) return true;
+
+  const tokens = rawTrimmed
+    .split(/[\s\u3000]+/u)
+    .map((w) => normalizeForMatch(w))
+    .filter((w) => w.length > 0);
+
+  if (tokens.length === 0) {
+    const lowerQuery = rawTrimmed.toLowerCase();
+    return (
+      (title || '').toLowerCase().includes(lowerQuery) ||
+      (artist || '').toLowerCase().includes(lowerQuery)
+    );
+  }
+
+  const normTitle = normalizeForMatch(title);
+  const normArtist = normalizeForMatch(artist);
+
+  return tokens.every((token) => normTitle.includes(token) || normArtist.includes(token));
+}
+
+/**
+ * Memecah teks asli menjadi segmen biasa dan segmen <mark> berdasarkan kata kunci yang dinormalisasi,
+ * aman untuk dirender sebagai elemen React tanpa innerHTML.
+ */
+export function splitTextForHighlight(text: string, query: string): HighlightSegment[] {
+  if (!text) return [];
+  const rawTrimmed = (query || '').trim();
+  if (!rawTrimmed) {
+    return [{ text, highlight: false }];
+  }
+
+  const normChars: string[] = [];
+  const normMap: Array<{ start: number; end: number }> = [];
+
+  for (let i = 0; i < text.length; ) {
+    const codePoint = text.codePointAt(i)!;
+    const char = String.fromCodePoint(codePoint);
+    const nextIdx = i + char.length;
+    const norm = normalizeForMatch(char);
+    if (norm.length > 0) {
+      for (let k = 0; k < norm.length; k += 1) {
+        normChars.push(norm[k]);
+        normMap.push({ start: i, end: nextIdx });
+      }
+    }
+    i = nextIdx;
+  }
+
+  const normText = normChars.join('');
+  if (!normText) {
+    return [{ text, highlight: false }];
+  }
+
+  const fullNorm = normalizeForMatch(rawTrimmed);
+  const wordNorms = rawTrimmed
+    .split(/[\s\u3000]+/u)
+    .map((w) => normalizeForMatch(w))
+    .filter((w) => w.length > 0);
+
+  const patterns = Array.from(new Set([fullNorm, ...wordNorms].filter((p) => p.length > 0)));
+  if (patterns.length === 0) {
+    return [{ text, highlight: false }];
+  }
+
+  const intervals: Array<[number, number]> = [];
+  for (const pat of patterns) {
+    let fromIdx = 0;
+    while (fromIdx <= normText.length - pat.length) {
+      const found = normText.indexOf(pat, fromIdx);
+      if (found === -1) break;
+      const origStart = normMap[found].start;
+      const origEnd = normMap[found + pat.length - 1].end;
+      intervals.push([origStart, origEnd]);
+      fromIdx = found + 1;
+    }
+  }
+
+  if (intervals.length === 0) {
+    return [{ text, highlight: false }];
+  }
+
+  intervals.sort((a, b) => (a[0] !== b[0] ? a[0] - b[0] : b[1] - a[1]));
+  const merged: Array<[number, number]> = [];
+  for (const [start, end] of intervals) {
+    if (merged.length === 0 || start > merged[merged.length - 1][1]) {
+      merged.push([start, end]);
+    } else if (end > merged[merged.length - 1][1]) {
+      merged[merged.length - 1][1] = end;
+    }
+  }
+
+  const segments: HighlightSegment[] = [];
+  let cursor = 0;
+  for (const [start, end] of merged) {
+    if (start > cursor) {
+      segments.push({ text: text.slice(cursor, start), highlight: false });
+    }
+    segments.push({ text: text.slice(start, end), highlight: true });
+    cursor = end;
+  }
+  if (cursor < text.length) {
+    segments.push({ text: text.slice(cursor), highlight: false });
+  }
+
+  return segments;
+}
+

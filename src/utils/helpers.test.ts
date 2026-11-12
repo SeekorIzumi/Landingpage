@@ -42,6 +42,8 @@ import {
   formatLyricCandidateLabel,
   shouldWarnLyricDurationDiff,
   sortLyricCandidatesByDurationDiff,
+  matchesPlaylistTrackSearch,
+  splitTextForHighlight,
 } from './helpers';
 
 test('formatTimeDot formats Date into HH.MM.SS with dots and zero padding', () => {
@@ -734,5 +736,43 @@ test('formatDurationMmSs, formatDurationDiffSigned, formatLyricCandidateLabel, s
     [2, 3, 1] // diffs from 217s: |218-217|=1s, |213-217|=4s, |90-217|=127s
   );
 });
+
+test('matchesPlaylistTrackSearch and splitTextForHighlight match normalized multi-word queries and highlight spans accurately', () => {
+  // 1. "nakano ke" matches "Nakano-ke no Itsutsugo"
+  assert.equal(
+    matchesPlaylistTrackSearch('Gotoubun no Kimochi', 'Nakano-ke no Itsutsugo', 'nakano ke'),
+    true
+  );
+  // 2. Multi-word out-of-order across title and artist
+  assert.equal(
+    matchesPlaylistTrackSearch('Gotoubun no Kimochi', 'Nakano-ke no Itsutsugo', 'itsutsugo gotoubun'),
+    true
+  );
+  // 3. Case-insensitive and full-width character normalization
+  assert.equal(
+    matchesPlaylistTrackSearch('夜に駆ける (Into The Night)', 'YOASOBI', 'ＩＮＴＯ night'),
+    true
+  );
+  // 4. All words must match
+  assert.equal(
+    matchesPlaylistTrackSearch('Gotoubun no Kimochi', 'Nakano-ke no Itsutsugo', 'nakano nonexistent'),
+    false
+  );
+
+  // 5. Highlighting spans preserves original casing and punctuation inside matched span
+  const segments = splitTextForHighlight('Nakano-ke no Itsutsugo', 'nakano ke');
+  assert.deepEqual(segments, [
+    { text: 'Nakano-ke', highlight: true },
+    { text: ' no Itsutsugo', highlight: false },
+  ]);
+
+  const multiSegments = splitTextForHighlight('Gotoubun no Kimochi', 'kimochi gotoubun');
+  assert.deepEqual(multiSegments, [
+    { text: 'Gotoubun', highlight: true },
+    { text: ' no ', highlight: false },
+    { text: 'Kimochi', highlight: true },
+  ]);
+});
+
 
 

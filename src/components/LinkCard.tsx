@@ -1,7 +1,7 @@
-import { useRef, useState } from 'react';
-import type { MouseEvent } from 'react';
-import { BookOpen, ChevronDown, Gift, ListMusic, Music, Sparkles } from 'lucide-react';
-import type { CardIconType, LinkCardItem } from '../config/siteConfig';
+import { useEffect, useRef, useState } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent } from 'react';
+import { BookOpen, ChevronDown, Gift, Headphones, ListMusic, Music, Sparkles } from 'lucide-react';
+import type { CardIconType, CardSubLink, LinkCardItem } from '../config/siteConfig';
 import { calculateCardTilt } from '../utils/helpers';
 
 function renderCardIcon(icon: CardIconType) {
@@ -26,6 +26,15 @@ function renderCardIcon(icon: CardIconType) {
   }
 }
 
+function renderSubLinkPlatformIcon(sub: CardSubLink, index: number) {
+  const lowerId = sub.id.toLowerCase();
+  const lowerLabel = sub.label.toLowerCase();
+  if (lowerId.includes('spotify') || lowerLabel.includes('spotify') || index % 2 === 1) {
+    return <Headphones className="card-arrow-menu-item-icon" aria-hidden="true" />;
+  }
+  return <Music className="card-arrow-menu-item-icon" aria-hidden="true" />;
+}
+
 interface LinkCardProps {
   card: LinkCardItem;
 }
@@ -33,9 +42,34 @@ interface LinkCardProps {
 export function LinkCard({ card }: LinkCardProps) {
   const cardRef = useRef<HTMLElement | null>(null);
   const glareRef = useRef<HTMLDivElement>(null);
+  const arrowWrapRef = useRef<HTMLDivElement | null>(null);
+  const arrowButtonRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
   const [isRulesOpen, setIsRulesOpen] = useState(false);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [openUpward, setOpenUpward] = useState(false);
+
+  const availableSubLinks = (card.subLinks ?? []).filter((sub) =>
+    Boolean(sub.href && sub.href.trim().length > 0)
+  );
+  const hasMultipleSubLinks = availableSubLinks.length >= 2;
+  const menuId = `card-platform-menu-${card.id}`;
+
+  const resetCardTransform = () => {
+    const el = cardRef.current;
+    if (!el) return;
+    el.style.transform = 'scale3d(1, 1, 1) rotateX(0deg) rotateY(0deg)';
+    el.style.transition = 'transform 0.35s cubic-bezier(0.16, 1, 0.3, 1)';
+
+    if (glareRef.current) {
+      glareRef.current.style.background =
+        'radial-gradient(circle at 50% 50%, rgba(143, 163, 199, 0.16), transparent 60%)';
+    }
+  };
 
   const handleMouseMove = (e: MouseEvent<HTMLElement>) => {
+    if (isMenuOpen) return;
     const el = cardRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
@@ -53,15 +87,7 @@ export function LinkCard({ card }: LinkCardProps) {
   };
 
   const handleMouseLeave = () => {
-    const el = cardRef.current;
-    if (!el) return;
-    el.style.transform = 'scale3d(1, 1, 1) rotateX(0deg) rotateY(0deg)';
-    el.style.transition = 'transform 0.6s cubic-bezier(0.16, 1, 0.3, 1)';
-
-    if (glareRef.current) {
-      glareRef.current.style.background =
-        'radial-gradient(circle at 50% 50%, rgba(143, 163, 199, 0.16), transparent 60%)';
-    }
+    resetCardTransform();
   };
 
   const handleToggleRules = (e: MouseEvent<HTMLButtonElement>) => {
@@ -75,8 +101,133 @@ export function LinkCard({ card }: LinkCardProps) {
     e.stopPropagation();
   };
 
+  const computeShouldOpenUpward = () => {
+    const btn = arrowButtonRef.current;
+    if (!btn || typeof window === 'undefined') return false;
+    const rect = btn.getBoundingClientRect();
+    const isCompactViewport = window.innerWidth < 1024;
+    const itemHeight = isCompactViewport ? 46 : 38;
+    const estimatedMenuHeight = 36 + availableSubLinks.length * itemHeight;
+    const playerEl = isCompactViewport ? document.querySelector('.music-player') : null;
+    const playerTop = playerEl ? playerEl.getBoundingClientRect().top : window.innerHeight;
+    const bottomLimit = isCompactViewport
+      ? Math.min(window.innerHeight - 12, playerTop - 8)
+      : window.innerHeight - 12;
+    const spaceBelow = bottomLimit - rect.bottom;
+    return spaceBelow < estimatedMenuHeight && rect.top > estimatedMenuHeight;
+  };
+
+  const openMenu = (focusFirstItem: boolean) => {
+    resetCardTransform();
+    setOpenUpward(computeShouldOpenUpward());
+    setIsMenuOpen(true);
+    if (focusFirstItem) {
+      window.requestAnimationFrame(() => {
+        const firstItem = menuRef.current?.querySelector<HTMLAnchorElement>('[role="menuitem"]');
+        firstItem?.focus();
+      });
+    }
+  };
+
+  const handleToggleMenuClick = (e: MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (isMenuOpen) {
+      setIsMenuOpen(false);
+    } else {
+      // detail === 0 indicates keyboard activation (Enter / Space) on button
+      openMenu(e.detail === 0);
+    }
+  };
+
+  const handleArrowButtonKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!isMenuOpen) {
+        openMenu(true);
+      } else {
+        const firstItem = menuRef.current?.querySelector<HTMLAnchorElement>('[role="menuitem"]');
+        firstItem?.focus();
+      }
+    } else if (e.key === 'Escape' && isMenuOpen) {
+      e.preventDefault();
+      e.stopPropagation();
+      setIsMenuOpen(false);
+      arrowButtonRef.current?.focus();
+    }
+  };
+
+  const handleMenuKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(
+      menuRef.current?.querySelectorAll<HTMLAnchorElement>('[role="menuitem"]') ?? []
+    );
+    if (items.length === 0) return;
+    const activeEl = document.activeElement as HTMLAnchorElement | null;
+    const currentIdx = activeEl ? items.indexOf(activeEl) : -1;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      e.stopPropagation();
+      const nextIdx = currentIdx < 0 ? 0 : (currentIdx + 1) % items.length;
+      items[nextIdx]?.focus();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopPropagation();
+      const prevIdx = currentIdx <= 0 ? items.length - 1 : currentIdx - 1;
+      items[prevIdx]?.focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      e.stopPropagation();
+      items[0]?.focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      e.stopPropagation();
+      items[items.length - 1]?.focus();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      setIsMenuOpen(false);
+      arrowButtonRef.current?.focus();
+    } else if (e.key === 'Tab') {
+      setIsMenuOpen(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isMenuOpen) return;
+
+    const handlePointerDownOutside = (e: globalThis.MouseEvent | TouchEvent) => {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (arrowWrapRef.current?.contains(target)) return;
+      setIsMenuOpen(false);
+    };
+
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsMenuOpen(false);
+        arrowButtonRef.current?.focus();
+      }
+    };
+
+    document.addEventListener('mousedown', handlePointerDownOutside);
+    document.addEventListener('touchstart', handlePointerDownOutside, { passive: true });
+    document.addEventListener('keydown', handleGlobalKeyDown);
+
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDownOutside);
+      document.removeEventListener('touchstart', handlePointerDownOutside);
+      document.removeEventListener('keydown', handleGlobalKeyDown);
+    };
+  }, [isMenuOpen]);
+
   const hasSubLinks = Boolean(card.subLinks && card.subLinks.length > 0);
   const hasRules = Boolean(card.expandableRules && card.expandableRules.items.length > 0);
+  const singleAvailableHref =
+    availableSubLinks.length === 1 ? availableSubLinks[0].href : card.href;
 
   const innerContent = (
     <>
@@ -145,9 +296,57 @@ export function LinkCard({ card }: LinkCardProps) {
           </div>
         )}
       </div>
-      {hasSubLinks && card.href ? (
+      {hasSubLinks && hasMultipleSubLinks ? (
+        <div ref={arrowWrapRef} className="card-arrow-menu-wrap">
+          <button
+            ref={arrowButtonRef}
+            type="button"
+            className={`arrow arrow-menu-trigger${isMenuOpen ? ' is-open' : ''}`}
+            aria-haspopup="menu"
+            aria-expanded={isMenuOpen}
+            aria-controls={menuId}
+            aria-label={`Pilih platform untuk membuka ${card.title}`}
+            onClick={handleToggleMenuClick}
+            onKeyDown={handleArrowButtonKeyDown}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <line x1="5" y1="12" x2="19" y2="12" />
+              <polyline points="12 5 19 12 12 19" />
+            </svg>
+          </button>
+
+          {isMenuOpen && (
+            <div
+              ref={menuRef}
+              id={menuId}
+              role="menu"
+              aria-label={`Pilih platform untuk membuka ${card.title}`}
+              className={`card-arrow-menu${openUpward ? ' is-upward' : ''}`}
+              onKeyDown={handleMenuKeyDown}
+            >
+              <div className="card-arrow-menu-header" aria-hidden="true">
+                Buka di
+              </div>
+              {availableSubLinks.map((sub, idx) => (
+                <a
+                  key={sub.id}
+                  href={sub.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  role="menuitem"
+                  className="card-arrow-menu-item"
+                  onClick={() => setIsMenuOpen(false)}
+                >
+                  {renderSubLinkPlatformIcon(sub, idx)}
+                  <span className="card-arrow-menu-item-label">{sub.label}</span>
+                </a>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : hasSubLinks && singleAvailableHref ? (
         <a
-          href={card.href}
+          href={singleAvailableHref}
           target="_blank"
           rel="noopener noreferrer"
           className="arrow"
@@ -175,7 +374,7 @@ export function LinkCard({ card }: LinkCardProps) {
         ref={(node) => {
           cardRef.current = node;
         }}
-        className="card card-with-pills"
+        className={`card card-with-pills${isMenuOpen ? ' is-menu-open' : ''}`}
         role="group"
         aria-label={card.ariaLabel}
         onMouseMove={handleMouseMove}
@@ -203,3 +402,4 @@ export function LinkCard({ card }: LinkCardProps) {
     </a>
   );
 }
+

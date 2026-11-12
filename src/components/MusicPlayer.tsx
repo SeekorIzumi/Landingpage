@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
-import type { CSSProperties, FormEvent, MouseEvent } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent } from 'react';
 import {
   ChevronUp,
   ExternalLink,
@@ -8,6 +8,7 @@ import {
   Pause,
   Play,
   RotateCcw,
+  Search,
   SkipBack,
   SkipForward,
   X,
@@ -27,6 +28,7 @@ import {
   getYouTubeDefaultThumbnailUrl,
   getYouTubeThumbnailUrl,
   isNonSkippablePlayerError,
+  matchesPlaylistTrackSearch,
   parseCustomYouTubeUrl,
   parseLrcSyncedLyrics,
   parseYouTubeTrackInfo,
@@ -36,6 +38,7 @@ import {
   shouldReplaceNotice,
   shouldWarnLyricDurationDiff,
   sortLyricCandidatesByDurationDiff,
+  splitTextForHighlight,
 } from '../utils/helpers';
 import type {
   LyricCandidateOption,
@@ -85,6 +88,10 @@ export const PLAYLIST_LOAD_TIMEOUT_MS = 10000;
 export const PLAYER_SCRIPT_TIMEOUT_MS = 10000;
 /** Umur cache lirik negatif (tidak ditemukan / tidak cocok) sebelum dicoba ulang (ms) */
 export const LYRIC_NEGATIVE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** Jumlah minimal lagu di playlist agar kolom pencarian ditampilkan */
+export const SEARCH_MIN_TRACKS = 8;
+/** Jeda debounce pencarian lagu di playlist (ms) */
+export const SEARCH_DEBOUNCE_MS = 120;
 
 interface RainSplash {
   x: number;
@@ -591,10 +598,31 @@ export function InlineLyricsSlot() {
   );
 }
 
+function renderHighlightedText(text: string, query: string) {
+  if (!query) return text;
+  const segments = splitTextForHighlight(text, query);
+  if (segments.length === 1 && !segments[0].highlight) {
+    return text;
+  }
+  return segments.map((seg, i) =>
+    seg.highlight ? (
+      <mark key={i} className="mp-search-highlight">
+        {seg.text}
+      </mark>
+    ) : (
+      <span key={i}>{seg.text}</span>
+    )
+  );
+}
+
 export function MusicPlayer() {
   const { playlistId, playlistUrl, albumArtSrc, title: defaultTitle, artist: defaultArtist } =
     siteConfig.widgets.musicPlayer;
   const isInlineLyricViewport = useIsInlineLyricViewport();
+  const requestLaguHref = useMemo(
+    () => siteConfig.cards.find((card) => card.id === 'request-lagu')?.href || '',
+    []
+  );
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPlaylistOpen, setIsPlaylistOpen] = useState(false);
@@ -635,6 +663,8 @@ export function MusicPlayer() {
   });
   const [customLinkInput, setCustomLinkInput] = useState<string>(() => readSavedCustomLink() || '');
   const [customLinkFeedback, setCustomLinkFeedback] = useState<InlineLinkFeedback | null>(null);
+  const [searchInput, setSearchInput] = useState<string>('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState<string>('');
 
   const [activeNotice, setActiveNotice] = useState<ActiveNoticeState | null>(null);
   const [panelHeight, setPanelHeight] = useState(0);
@@ -664,6 +694,8 @@ export function MusicPlayer() {
   const playlistPanelRef = useRef<HTMLDivElement | null>(null);
   const playlistListRef = useRef<HTMLDivElement | null>(null);
   const playlistTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchInputValueRef = useRef<string>('');
   const rainCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const noticeRef = useRef<HTMLDivElement | null>(null);
 
@@ -1652,18 +1684,100 @@ export function MusicPlayer() {
     };
   }, [isLyricsEnabled]);
 
-  // Auto-scroll active track into view when playlist opens or activeIndex changes
+  const clearPlaylistSearch = useCallback(() => {
+    searchInputValueRef.current = '';
+    setSearchInput('');
+    setDebouncedSearchQuery('');
+  }, []);
+
+  // Debounce playlist search input (~120ms)
   useEffect(() => {
-    if (!isPlaylistOpen || !playlistListRef.current) return;
+    searchInputValueRef.current = searchInput;
+    if (!searchInput.trim()) {
+      setDebouncedSearchQuery('');
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setDebouncedSearchQuery(searchInput);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [searchInput]);
+
+  // Clear search text when panel closes, when single track is loaded, or when playlist has < SEARCH_MIN_TRACKS
+  useEffect(() => {
+    if (
+      !isPlaylistOpen ||
+      sourceMode.type === 'custom-video' ||
+      (playlistVideoIds.length > 0 && playlistVideoIds.length < SEARCH_MIN_TRACKS)
+    ) {
+      clearPlaylistSearch();
+    }
+  }, [isPlaylistOpen, sourceMode.type, playlistVideoIds.length, clearPlaylistSearch]);
+
+  const canShowPlaylistSearch = playlistVideoIds.length >= SEARCH_MIN_TRACKS;
+  const activeSearchQuery = canShowPlaylistSearch ? debouncedSearchQuery.trim() : '';
+  const isSearchFilterActive = activeSearchQuery.length > 0;
+
+  // Compute loading progress and filtered playlist rows from existing state without refetching
+  const playlistSearchStats = useMemo(() => {
+    const total = playlistVideoIds.length;
+    let pendingLoadingCount = 0;
+
+    for (let i = 0; i < total; i += 1) {
+      const vid = playlistVideoIds[i];
+      const meta = trackMetaMap[vid];
+      const isPlaceholderTitle = !meta?.title || /^Lagu\s+\d+$/i.test(meta.title);
+      const isStillLoading = !meta || meta.status === 'loading' || (meta.status === 'loaded' && isPlaceholderTitle);
+      if (isStillLoading) {
+        pendingLoadingCount += 1;
+      }
+    }
+
+    const completedCount = total - pendingLoadingCount;
+    const isStillLoadingTitles = total > 0 && pendingLoadingCount > 0;
+
+    return {
+      total,
+      completedCount,
+      isStillLoadingTitles,
+    };
+  }, [playlistVideoIds, trackMetaMap]);
+
+  const filteredPlaylistItems = useMemo(() => {
+    if (!isSearchFilterActive) {
+      return playlistVideoIds.map((vid, index) => ({ vid, index }));
+    }
+
+    const matched: Array<{ vid: string; index: number }> = [];
+    for (let index = 0; index < playlistVideoIds.length; index += 1) {
+      const vid = playlistVideoIds[index];
+      const meta = trackMetaMap[vid];
+      // Unloaded rows (skeleton or placeholder "Lagu {nomor}") are excluded from search results
+      if (!meta || meta.status === 'loading') continue;
+      const title = meta.title || '';
+      if (!title || /^Lagu\s+\d+$/i.test(title)) continue;
+      const artist = meta.artist || defaultArtist;
+      if (matchesPlaylistTrackSearch(title, artist, activeSearchQuery)) {
+        matched.push({ vid, index });
+      }
+    }
+    return matched;
+  }, [isSearchFilterActive, playlistVideoIds, trackMetaMap, defaultArtist, activeSearchQuery]);
+
+  // Auto-scroll active track into view when playlist opens or activeIndex changes (only when search filter is empty)
+  useEffect(() => {
+    if (!isPlaylistOpen || !playlistListRef.current || isSearchFilterActive) return;
     const activeEl = playlistListRef.current.querySelector<HTMLElement>(
       `[data-track-index="${activeIndex}"]`
     );
     if (activeEl && typeof activeEl.scrollIntoView === 'function') {
       activeEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
-  }, [activeIndex, isPlaylistOpen, playlistVideoIds.length]);
+  }, [activeIndex, isPlaylistOpen, playlistVideoIds.length, isSearchFilterActive]);
 
-  // Close playlist panel on click outside or Escape key
+  // Close playlist panel on click outside or Escape key (if search has text, Escape clears text first and keeps panel open)
   useEffect(() => {
     if (!isPlaylistOpen) return;
 
@@ -1679,6 +1793,11 @@ export function MusicPlayer() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
+        if (searchInputValueRef.current.length > 0) {
+          clearPlaylistSearch();
+          searchInputRef.current?.focus();
+          return;
+        }
         setIsPlaylistOpen(false);
         playlistTriggerRef.current?.focus();
       }
@@ -1693,7 +1812,7 @@ export function MusicPlayer() {
       document.removeEventListener('touchstart', handlePointerDown);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isPlaylistOpen]);
+  }, [isPlaylistOpen, clearPlaylistSearch]);
 
   const clearPlaylistLoadingTimers = useCallback(() => {
     if (playlistPollRef.current !== null) {
@@ -2150,6 +2269,7 @@ export function MusicPlayer() {
     if (!ensurePlayerAvailable()) return;
 
     clearPlaylistLoadingTimers();
+    clearPlaylistSearch();
     consecutiveErrorsRef.current = 0;
     userInitiatedPlayRef.current = true;
     notifiedLyricTracksRef.current.clear();
@@ -2269,6 +2389,7 @@ export function MusicPlayer() {
   const handleReturnToDefaultPlaylist = (e: MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
     clearPlaylistLoadingTimers();
+    clearPlaylistSearch();
     consecutiveErrorsRef.current = 0;
     notifiedLyricTracksRef.current.clear();
 
@@ -2446,6 +2567,80 @@ export function MusicPlayer() {
         scheduleMetadataSync(player, 250);
       } catch {
         // Ignore
+      }
+    }
+  };
+
+  const handleClearSearchClick = (e: MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
+    clearPlaylistSearch();
+    searchInputRef.current?.focus();
+  };
+
+  const handleSearchInputKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Escape') {
+      if (searchInput.length > 0) {
+        e.preventDefault();
+        e.stopPropagation();
+        clearPlaylistSearch();
+        searchInputRef.current?.focus();
+      }
+      return;
+    }
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const firstRow = playlistListRef.current?.querySelector<HTMLButtonElement>('.mp-playlist-item');
+      firstRow?.focus();
+      return;
+    }
+
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const immediateQuery = searchInput.trim();
+      if (!immediateQuery) {
+        if (playlistVideoIds.length > 0) {
+          handleSelectTrack(0);
+        }
+        return;
+      }
+
+      if (debouncedSearchQuery !== searchInput) {
+        setDebouncedSearchQuery(searchInput);
+      }
+
+      for (let index = 0; index < playlistVideoIds.length; index += 1) {
+        const vid = playlistVideoIds[index];
+        const meta = trackMetaMap[vid];
+        if (!meta || meta.status === 'loading') continue;
+        const title = meta.title || '';
+        if (!title || /^Lagu\s+\d+$/i.test(title)) continue;
+        const artist = meta.artist || defaultArtist;
+        if (matchesPlaylistTrackSearch(title, artist, immediateQuery)) {
+          handleSelectTrack(index);
+          return;
+        }
+      }
+    }
+  };
+
+  const handlePlaylistItemKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    const listEl = playlistListRef.current;
+    if (!listEl) return;
+    const items = Array.from(listEl.querySelectorAll<HTMLButtonElement>('.mp-playlist-item'));
+    const currentPos = items.indexOf(e.currentTarget);
+    if (currentPos === -1) return;
+
+    e.preventDefault();
+    if (e.key === 'ArrowDown') {
+      const nextItem = items[currentPos + 1];
+      nextItem?.focus();
+    } else if (e.key === 'ArrowUp') {
+      if (currentPos === 0) {
+        searchInputRef.current?.focus();
+      } else {
+        items[currentPos - 1]?.focus();
       }
     }
   };
@@ -3029,6 +3224,70 @@ export function MusicPlayer() {
           </div>
         </div>
 
+        {canShowPlaylistSearch && (
+          <div
+            className="mp-playlist-search-section"
+            id="mp-playlist-search-section"
+            role="search"
+          >
+            <div className="mp-playlist-search-box">
+              <Search className="mp-playlist-search-icon" aria-hidden="true" />
+              <input
+                ref={searchInputRef}
+                type="search"
+                id="mp-playlist-search-input"
+                className="mp-playlist-search-input"
+                placeholder="Cari judul atau artis..."
+                aria-label="Cari lagu di playlist"
+                aria-controls="mp-playlist-list"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                onKeyDown={handleSearchInputKeyDown}
+                tabIndex={isPlaylistOpen ? 0 : -1}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              {searchInput.length > 0 && (
+                <button
+                  type="button"
+                  id="mp-playlist-search-clear"
+                  className="mp-playlist-search-clear"
+                  onClick={handleClearSearchClick}
+                  aria-label="Hapus pencarian"
+                  tabIndex={isPlaylistOpen ? 0 : -1}
+                >
+                  <X className="mp-playlist-search-clear-icon" aria-hidden="true" />
+                </button>
+              )}
+            </div>
+
+            {(isSearchFilterActive || playlistSearchStats.isStillLoadingTitles) && (
+              <div
+                className="mp-playlist-search-meta"
+                id="mp-playlist-search-meta"
+                aria-live="polite"
+              >
+                {isSearchFilterActive && (
+                  <span
+                    className="mp-playlist-search-count"
+                    id="mp-playlist-search-count"
+                  >
+                    {`${filteredPlaylistItems.length} dari ${playlistVideoIds.length} lagu`}
+                  </span>
+                )}
+                {playlistSearchStats.isStillLoadingTitles && (
+                  <span
+                    className="mp-playlist-search-loading"
+                    id="mp-playlist-search-loading"
+                  >
+                    {`Memuat judul lagu... (${playlistSearchStats.completedCount}/${playlistSearchStats.total})`}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="mp-playlist-list" id="mp-playlist-list" ref={playlistListRef}>
           {playlistVideoIds.length === 0 ? (
             Array.from({ length: 6 }).map((_, idx) => (
@@ -3041,8 +3300,47 @@ export function MusicPlayer() {
                 </span>
               </div>
             ))
+          ) : isSearchFilterActive && filteredPlaylistItems.length === 0 ? (
+            <div
+              className="mp-playlist-search-empty"
+              id="mp-playlist-search-empty"
+              role="status"
+              aria-live="polite"
+            >
+              <p className="mp-playlist-search-empty-text" id="mp-playlist-search-empty-text">
+                {`Tidak ada lagu yang cocok dengan "${activeSearchQuery}"`}
+              </p>
+              {!playlistSearchStats.isStillLoadingTitles && (
+                <div className="mp-playlist-search-suggestions" id="mp-playlist-search-suggestions">
+                  {sourceMode.type === 'default' && requestLaguHref && (
+                    <a
+                      href={requestLaguHref}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mp-search-suggest-pill"
+                      id="mp-search-suggest-request"
+                      aria-label="Request lagu ini lewat Saweria"
+                      tabIndex={isPlaylistOpen ? 0 : -1}
+                    >
+                      Request lagu ini
+                    </a>
+                  )}
+                  <a
+                    href={`https://music.youtube.com/search?q=${encodeURIComponent(activeSearchQuery)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mp-search-suggest-pill"
+                    id="mp-search-suggest-ytm"
+                    aria-label="Cari lagu ini di YouTube Music"
+                    tabIndex={isPlaylistOpen ? 0 : -1}
+                  >
+                    Cari di YouTube Music
+                  </a>
+                </div>
+              )}
+            </div>
           ) : (
-            playlistVideoIds.map((vid, idx) => {
+            filteredPlaylistItems.map(({ vid, index: idx }) => {
               const meta = trackMetaMap[vid];
               const isLoading = !meta || meta.status === 'loading';
               const isActive = idx === activeIndex;
@@ -3060,6 +3358,7 @@ export function MusicPlayer() {
                     isActive && isPlaying ? ' is-playing' : ''
                   }`}
                   onClick={() => handleSelectTrack(idx)}
+                  onKeyDown={handlePlaylistItemKeyDown}
                   aria-label={`Putar lagu ${idx + 1}: ${displayTitle} - ${displayArtist}`}
                   aria-current={isActive ? 'true' : undefined}
                   tabIndex={isPlaylistOpen ? 0 : -1}
@@ -3104,10 +3403,14 @@ export function MusicPlayer() {
                   ) : (
                     <span className="mp-playlist-meta">
                       <span className="mp-playlist-item-title" title={displayTitle}>
-                        {displayTitle}
+                        {isSearchFilterActive
+                          ? renderHighlightedText(displayTitle, activeSearchQuery)
+                          : displayTitle}
                       </span>
                       <span className="mp-playlist-item-artist" title={displayArtist}>
-                        {displayArtist}
+                        {isSearchFilterActive
+                          ? renderHighlightedText(displayArtist, activeSearchQuery)
+                          : displayArtist}
                       </span>
                     </span>
                   )}
